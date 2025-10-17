@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>WS Chat Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    #messages { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: auto; margin-bottom: 10px; }
+    #input { width: 70%; padding: 5px; }
+    #send, #connect { padding: 5px 10px; margin-left: 5px; }
+    .message { margin-bottom: 8px; }
+    .response { color: green; }
+  </style>
+</head>
+<body>
+
+<h2>Тест WS /batching</h2>
+<div id="messages"></div>
+<input id="input" placeholder="Напиши сообщение" disabled />
+<button id="send" disabled>Отправить</button>
+<button id="connect">Установить WS-соединение</button>
+
+<script>
+  const uuid = "123e4567-e89b-12d3-a456-426614174000";
+  let ws = null;
+
+  const messagesDiv = document.getElementById("messages");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const connectBtn = document.getElementById("connect");
+
+  function appendMessage(text, cls="message") {
+    const div = document.createElement("div");
+    div.className = cls;
+    div.textContent = text;
+    messagesDiv.appendChild(div);
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  }
+
+  connectBtn.onclick = () => {
+    if(ws && ws.readyState === WebSocket.OPEN) {
+      appendMessage("Система: WS уже подключен.");
+      return;
+    }
+
+    ws = new WebSocket("ws://localhost:8000/batching"); // поменяй на свой сервер
+
+    ws.onopen = () => {
+      appendMessage("Система: WS соединение установлено.");
+      input.disabled = false;
+      sendBtn.disabled = false;
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        appendMessage(`Сервер: ${data.response}`, "response");
+      } catch(e) {
+        console.error("Не удалось распарсить сообщение:", event.data);
+      }
+    };
+
+    ws.onerror = (err) => {
+      appendMessage("Система: Ошибка WS соединения.");
+      console.error(err);
+    };
+
+    ws.onclose = () => {
+      appendMessage("Система: WS соединение закрыто.");
+      input.disabled = true;
+      sendBtn.disabled = true;
+    };
+  };
+
+  sendBtn.onclick = () => {
+    const prompt = input.value.trim();
+    if(!prompt || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const msg = { uuid, prompt };
+    ws.send(JSON.stringify(msg));
+    appendMessage(`Ты: ${prompt}`);
+    input.value = "";
+  };
+
+  input.addEventListener("keydown", (e) => {
+    if(e.key === "Enter") sendBtn.click();
+  });
+</script>
+
+</body>
+</html>
