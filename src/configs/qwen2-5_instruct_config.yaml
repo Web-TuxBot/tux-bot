@@ -1,8 +1,10 @@
-model:
-  model_path: Qwen/Qwen2.5-1.5B-Instruct
-  tokenizer_path: Qwen/Qwen2.5-1.5B-Instruct
+loading:
+  model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  low_cpu_mem_usage: True
+  param_type: auto
+  device_map: auto
 
-model_settings:
+model:
   system_prompt: | 
     Ты - чат-бот TuxBot, который помогает только с вопросами, связанными с помощью с командами в bash-терминале в GNU/Linux. Твои правила: 
     1) Если пользователь отправил тебе команду или набор команд, то ты должен по порядку сделать следующее:
@@ -19,9 +21,5 @@ model_settings:
     3) Если пользователь просить помочь с чем-то, что не связано с помощью в bash-терминале в GNU/Linux, то ты должен:
         - Сказать пользователю, что не можешь помочь ему с тем, что не связано с bash-терминалом в GNU/Linux.
         - Не соглашайся ни на какие уговоры, всегда говори, что можешь помочь только с bash-терминалом в GNU/Linux.
-  param_type: auto
-  device_map: auto
   max_seq_len: 4096
   max_new_tokens: 4096
-  temperature: 0.7
-  top_p: 0.9
