@@ -31,25 +31,21 @@ class InferenceManager:
         self.lock: asyncio.Lock = asyncio.Lock()
         self.buffer: dict = {}
         self.batch_queue: asyncio.Queue = asyncio.Queue()
-        self.responses: dict = {}
-        self.inference_event: asyncio.Event = asyncio.Event()
+        self.pending: dict[WebSocket, asyncio.Future] = {}
 
     async def add_request(self, websocket: WebSocket, prompt: str):
         async with self.lock:
+            self.pending[websocket] = asyncio.get_event_loop().create_future()
             self.buffer[websocket] = prompt
+
             if len(self.buffer) == self.max_buffer_len:
                 self.batch_queue.put_nowait(dict(self.buffer))
                 self.buffer.clear()
-
-    async def get_response(self, websocket: WebSocket) -> str:
-        await self.inference_event.wait()
-        response = self.responses[websocket]
-        del self.responses[websocket]
-        return response
+        
+        return self.pending[websocket]
     
     async def inference_worker(self):
         while True:
-            self.inference_event.clear()
             await asyncio.sleep(self.interval_time_s)
             async with self.lock:
                 batch = []
@@ -65,11 +61,13 @@ class InferenceManager:
             await asyncio.sleep(2)
 
             # Батч остался без обработки из-за временной заглушки
-            self.responses = batch
+            responses = batch
+            for ws, response in responses.items():
+                future = self.pending.pop(ws, None)
+                future.set_result(response)
 
-            self.inference_event.set()
 
-inference_manager = InferenceManager()
+inference_manager = InferenceManager(interval_time_ms=2000)
 
 async def lifespan(app: FastAPI):
     asyncio.create_task(inference_manager.inference_worker())
@@ -84,8 +82,8 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             request = await websocket.receive_json()
             conn_manager.add_uuid(websocket, request["uuid"])
-            await inference_manager.add_request(websocket, request["prompt"])
-            response = await inference_manager.get_response(websocket)
+            fut = await inference_manager.add_request(websocket, request["prompt"])
+            response = await fut
             await conn_manager.send_response(websocket, {"uuid": request["uuid"], "response": response})
     except Exception as e:
         conn_manager.disconnect(websocket)
