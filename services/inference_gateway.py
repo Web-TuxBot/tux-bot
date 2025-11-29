@@ -5,6 +5,7 @@ import logging
 import json
 from datetime import datetime
 from .data_models import ChatRequest, ChatResponse, LLMRequest, LLMResponse
+from uuid import UUID
 
 
 class ConnectionManager:
@@ -22,13 +23,13 @@ class ConnectionManager:
         self.active_connections.add(ws)
         logger.info(f"Установлено WebSocket-соединение с клиентом {self.ws_info(ws)}")
 
-    def add_uuid(self, ws: WebSocket, uuid: str) -> None:
+    def add_uuid(self, ws: WebSocket, uuid: UUID) -> None:
         if ws in self.active_connections:
             self.uuid_to_ws[uuid] = ws
         else:
             logger.error(f"""Не удалось добавить запрос с чата (uuid: {uuid}). 
                          Причина: Несуществующее WebSocket-соединение с клиентом {self.ws_info(ws)}.
-                         Доступные WebSocket-соединения с клиентами: {'\n'.join(self.ws_info(ws) for ws in self.active_connections)}""")
+                         Доступные WebSocket-соединения с клиентами: {'\n'.join(self.ws_info(ws) for ws in self.active_connections)}""", exc_info=True)
             raise ValueError(f"Несуществующее WebSocket-соединение с клиентом {self.ws_info(ws)}")
 
     async def disconnect(self, ws: WebSocket, code: int = 1000) -> None:
@@ -42,25 +43,25 @@ class ConnectionManager:
             logger.info(f"Разорвано WebSocket-соединение с клиентом {self.ws_info(ws)} (код: {code})")
         else:
             logger.error(f"""Попытка разрыва несуществующего WebSocket-соединения с клиентом {self.ws_info(ws)}.
-                         Доступные WebSocket-соединения с клиентами: {'\n'.join(id(ws) for ws in self.active_connections)}""")
+                         Доступные WebSocket-соединения с клиентами: {'\n'.join(id(ws) for ws in self.active_connections)}""", exc_info=True)
     
     async def send_response(self, response: ChatResponse) -> None:
         try:
+            logger.debug(f"Попытка отправить ответ, ключи: {self.uuid_to_ws.keys()}")
             ws = self.uuid_to_ws[response.uuid]
             await asyncio.wait_for(ws.send_json(response.model_dump(mode="json")), timeout=30)
 
         except asyncio.TimeoutError:
             logger.error(f"""Не удалось отправить запрос по WebSocket-соединению клиенту {self.ws_info(ws)}. 
-                        Причина: Превышено время ожидания (Timeout)""")
+                        Причина: Превышено время ожидания (Timeout)""", exc_info=True)
             await self.disconnect(ws, 1006)
             
         except WebSocketDisconnect:
             logger.error(f"""Не удалось отправить запрос по WebSocket-соединению клиенту {self.ws_info(ws)}. 
-                        Причина: Клиент {self.ws_info(ws)} отсоединился""")
+                        Причина: Клиент {self.ws_info(ws)} отсоединился""", exc_info=True)
             await self.disconnect(ws)
             
 
-#TODO(mortiferrr): Убрать временную заглушку инференса и реализовать подключение к инференс-сервису
 class InferenceManager:
     def __init__(self, model_name: str, max_buffer_len: int = 10, interval_time_ms: int = 100):
         self.inference_uri = f"inference/{model_name}/generate"
@@ -87,23 +88,25 @@ class InferenceManager:
         
         return self.pending[uuid]
     
+    async def connect_inference(self):
+        self.ws_inference = await connect(f"ws://localhost:8002/{self.inference_uri}", ping_interval=None, ping_timeout=None)
+    
     async def inference(self, batch: dict) -> tuple[dict[str, list[str] | str], str]:
         requests, uuids = [], []
-        async with connect(f"ws://localhost:8002/{self.inference_uri}") as ws:
-            for uuid, request in batch.items():
-                requests.append(request)
-                uuids.append(uuid)
 
-            requests = LLMRequest(requests=requests)
-            await ws.send(requests.model_dump_json())
+        for uuid, request in batch.items():
+            requests.append(request)
+            uuids.append(uuid)
+        requests = LLMRequest(requests=requests)
 
-            responses = json.loads(await ws.recv())
-            responses = LLMResponse(**responses)
-            created_at = responses.created_at
-            
-            responses_dict = {}
-            for response, uuid in zip(responses.responses, uuids):
-                responses_dict[uuid] = response 
+        await self.ws_inference.send(requests.model_dump_json())
+        responses = json.loads(await self.ws_inference.recv())
+        responses = LLMResponse(**responses)
+        created_at = responses.created_at
+        
+        responses_dict = {}
+        for response, uuid in zip(responses.responses, uuids):
+            responses_dict[uuid] = response 
 
         return responses_dict, created_at
     
@@ -130,6 +133,7 @@ class InferenceManager:
 
 async def lifespan(app: FastAPI):
     asyncio.create_task(app.state.inference_manager.inference_worker())
+    await app.state.inference_manager.connect_inference()
     yield
 
 
@@ -167,7 +171,7 @@ def create_app():
                     data = await asyncio.wait_for(ws.receive_json(), timeout=30)
                 except asyncio.TimeoutError:
                     logger.error(f"Соединение с клиентом {host}:{port} потеряно")
-                    await app.state.conn_manager.disconnect(ws, code=1006)
+                    await app.state.conn_manager.disconnect(ws, code=1000)
                     break
 
                 req = ChatRequest(**data)
@@ -188,6 +192,6 @@ def create_app():
                 asyncio.create_task(handle_request(req.uuid, fut))
 
         except WebSocketDisconnect:
-            await app.state.conn_manager.disconnect(ws)
+            await app.state.conn_manager.disconnect(ws, code=1000)
     
     return app

@@ -67,13 +67,14 @@ def create_app():
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(ws.receive_json(), timeout=30)
+                    data = await asyncio.wait_for(ws.receive_json(), timeout=300)
                 except asyncio.TimeoutError:
                     logger.error(f"Соединение с клиентом {host}:{port} потеряно")
-                    #await ws.close(1006)
+                    await ws.close()
                     break
                 
                 batch = LLMRequest(**data)
+                
                 responses = app.state.model.get_response(batch.requests)
                 created_at = datetime.now().isoformat()
 
@@ -82,11 +83,11 @@ def create_app():
                         LLMResponse(responses=responses, created_at=created_at).model_dump()), timeout=30)
                 except asyncio.TimeoutError:
                     logger.error(f"Соединение с клиентом {host}:{port} потеряно")
-                    #await ws.close(1006)
+                    await ws.close()
                     break
 
-        finally:
-            await ws.close(1000)
+        except WebSocketDisconnect:
+            pass
 
     return app
 
