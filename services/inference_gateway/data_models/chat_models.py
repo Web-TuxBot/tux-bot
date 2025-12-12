@@ -10,13 +10,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     uuid: UUID
     response: str
-
-
-class LLMRequest(BaseModel):
-    requests: list[str]
-
-
-class LLMResponse(BaseModel):
-    responses: list[str]
     created_at: str
 
+class ClientReconnect(BaseModel):
+    uuids: list[UUID]

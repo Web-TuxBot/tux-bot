@@ -5,6 +5,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 import torch
 from omegaconf import DictConfig
 
+
 class Qwen2_5Model(ABC):
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
