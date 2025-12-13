@@ -3,7 +3,6 @@ from starlette.websockets import WebSocketState
 from websockets import connect, ClientConnection
 from websockets.exceptions import InvalidHandshake, InvalidStatus, ConnectionClosed
 import asyncio
-from asyncio import Event
 from pydantic import BaseModel
 import json
 from uuid import UUID
@@ -12,114 +11,184 @@ from ..data_models.chat_models import ChatResponse
 from ..data_models.inference_models import LLMResponse
 
 
-class ClientConnectionManager:
-    def __init__(self):
-        self.active_connections = {}
-        self.disconnected_uuids = set()
-        self.uuid_to_ws = {}
-        self.reconnect_events = []
-        self.lock = asyncio.Lock()
-        logger.debug("Инициализирован ClientConnectionManager")
+class ClientPingManager:
+    def __init__(self, time_ping_s: int, pong_timeout_s: int):
+        self.time_ping_s = time_ping_s
+        self.pong_timeout_s = pong_timeout_s
+        self.last_pong = {}
+        self.ping_tasks = {}
     
+    def get_frozen_client(self) -> list | None:
+        if len(self.ping_tasks) > 0:
+            wss = [ws for ws in self.ping_tasks if self.ping_tasks[ws].done()]
+            return wss if len(wss) > 0 else None
+        return None
+
+    async def handle_pong(self, ws: WebSocket) -> None:
+        self.last_pong[ws] = asyncio.get_running_loop().time()
+
+
+    async def check_pong(self, ws: WebSocket):
+        await asyncio.sleep(self.pong_timeout_s)
+
+        if asyncio.get_running_loop().time() - self.last_pong.get(ws, 0) > self.pong_timeout_s:
+            ws_info = f"{ws.client[0]}:{ws.client[1]}" if ws.client is not None else "unknown"
+            logger.info(f"Клиент {ws_info} не отвечает")
+            await self.remove_client(ws)
+            return False
+        
+        return True
+
+    async def ping_client(self, ws: WebSocket) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.time_ping_s)
+                if ws.client_state != WebSocketState.CONNECTED:
+                    break
+
+                try:
+                    await ws.send_json({"type": "ping"})
+                    check_pong_task = asyncio.create_task(self.check_pong(ws))
+                    ok = await check_pong_task
+                    if not ok:
+                        break
+
+                except (WebSocketDisconnect, RuntimeError):
+                    await self.remove_client(ws)
+                    break
+
+        except asyncio.CancelledError:
+            pass
+    
+    def add_client(self, ws: WebSocket) -> None:
+        task = asyncio.create_task(self.ping_client(ws))
+        self.ping_tasks[ws] = task
+
+    async def remove_client(self, ws: WebSocket) -> None:
+        task = self.ping_tasks.pop(ws, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+class ClientConnectionManager:
+    def __init__(self, client_ping_manager: ClientPingManager):
+        self._active_connections = {}
+        self._uuid_to_ws = {}
+        self.disconnect_lock = asyncio.Lock()
+        self.client_ping_manager = client_ping_manager
+    
+    @property
+    def active_connections(self):
+        return self._active_connections
+
+    def pop_uuid_to_ws(self, uuid: UUID):
+        return self._uuid_to_ws.pop(uuid, None)
+
     def get_conn_info(self, ws: WebSocket) -> str:
         if ws.client is None:
             return "unknown"
         host, port = ws.client
         return f"{host}:{port}"
-
-    async def stop(self) -> None:
-        logger.info("ClientConnectionManager завершает свою работу...")
-        for ws in list(self.active_connections):
-            await self.disconnect(ws)
-        logger.info("ClientConnectionManager завершил свою работу")
     
     async def add_uuid(self, ws: WebSocket, uuid: UUID):
-        if ws in self.active_connections:
-            async with self.lock:
-                self.active_connections[ws].append(uuid)
-                self.uuid_to_ws[uuid] = ws
+        if ws in self._active_connections:
+            self._active_connections[ws].append(uuid)
+            self._uuid_to_ws[uuid] = ws
         else:
             raise WebSocketDisconnect
     
-    async def get_reconnect_status(self, event_idx: int):
-        reconect_event: Event = self.reconnect_events[event_idx][0]
-        await reconect_event.wait()
-        return self.reconnect_events[event_idx]
-
     async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
-        self.active_connections[ws] = []
-        logger.info(f"Установлено WebSocket-соединение с клиентом {self.get_conn_info(ws)}")
+        try:
+            await ws.accept()
+            self._active_connections[ws] = []
+            self.client_ping_manager.add_client(ws)
+            logger.info(f"Установлено WebSocket-соединение с клиентом {self.get_conn_info(ws)}")
 
-    async def _reconnect_timer(self, uuids: tuple[UUID], event_idx: int) -> None:
-        reconect_event = self.reconnect_events[event_idx][0]
-        await asyncio.sleep(2)
-        if uuids in self.disconnected_uuids:
-            async with self.lock:
-                self.disconnected_uuids.discard(uuids)
-                for uuid in uuids:
-                    del self.uuid_to_ws[uuid]
-            logger.warning("Не удалось переподключиться к клиенту")
-        else:
-            self.reconnect_events[event_idx][1] = True
-            logger.warning("Переподключение к клиенту прошло успешно")
-        reconect_event.set()
-        return
+        except RuntimeError as e:
+            logger.error(f"Произошла ошибка при попытке принять WebSocket-соединение: {e}")
+            raise RuntimeError
+        
+        except WebSocketDisconnect as e:
+            logger.error("Клиент отсоединился во время принятия WebSocket-соединения")
+            raise WebSocketDisconnect
+
+    async def disconnect(self, ws: WebSocket, 
+                         code: int = 1000) -> None:
+        async with self.disconnect_lock:
+            if ws in self._active_connections:
+                try:
+                    if ws.client_state == WebSocketState.CONNECTED:
+                        await ws.close(code)
+                        logger.info(f"Разорвано WebSocket-соединение с клиентом {self.get_conn_info(ws)}: {code}")
+                    
+                except RuntimeError as e:
+                    logger.error(f"Произошла ошибка при попытке разрыва соединения с клиентом {self.get_conn_info(ws)}: {e}")
+                
+                except WebSocketDisconnect as e:
+                    logger.error(f"Произошла ошибка при попытке разрыва соединения с клиентом {self.get_conn_info(ws)}: Клиент уже отключен")
+
+                finally:  
+                    self._active_connections.pop(ws, None)
+                    for uuid in list(self._uuid_to_ws):
+                        if self._uuid_to_ws[uuid] == ws:
+                            self.pop_uuid_to_ws(uuid)
+
+
+class ClientManager:
+    def __init__(self, time_ping_s: int, pong_timeout_s: int):
+        self.client_ping_manager = ClientPingManager(time_ping_s=time_ping_s, 
+                                                    pong_timeout_s=pong_timeout_s)
+        self.client_connection_manager = ClientConnectionManager(self.client_ping_manager)
+        self.pong_timeout_s = pong_timeout_s
+        self.task_check_frozen_clients = asyncio.create_task(self.check_frozen_clients())
+
+    async def stop(self) -> None:
+        await asyncio.gather(*[self.client_connection_manager.disconnect(ws) 
+                               for ws in self.client_connection_manager.active_connections
+                               ])
+        try:
+            self.task_check_frozen_clients.cancel()
+
+        except asyncio.CancelledError:
+            pass
     
-    async def reconnect(self, ws: WebSocket, uuids: tuple[UUID]) -> bool:
-        if uuids in self.disconnected_uuids:
-            async with self.lock:
-                self.active_connections[ws] = list(uuids)
-                self.disconnected_uuids.discard(uuids)
-        else:
-            logger.warning(f"Не удалось восстановить запросы клиента {self.get_conn_info(ws)} после переподключения")
+    async def check_frozen_clients(self):
+        try:
+            while True:
+                await asyncio.sleep(self.pong_timeout_s)
+                wss = self.client_ping_manager.get_frozen_client()
+                if wss is not None:
+                    await asyncio.gather(*[self.client_connection_manager.disconnect(ws, 1001) for ws in wss])
 
-    async def disconnect(self, ws: WebSocket, code: int = 1000, reconnect: bool = False) -> int | None:
-        if ws in self.active_connections:
-            uuids = tuple(self.active_connections[ws])
-            
-            try:
-                await ws.close(code)
-            except RuntimeError:
-                pass
-
-            del self.active_connections[ws]
-            logger.info(f"Разорвано WebSocket-соединение с клиентом {self.get_conn_info(ws)}: {code}")
-
-            if reconnect:
-                logger.warning(f"Попытка переподключения к клиенту...")
-                self.disconnected_uuids.add(uuids)
-                reconnect_event = Event()
-                self.reconnect_events.append((reconnect_event, False))
-                asyncio.create_task(self._reconnect_timer(uuids, len(self.reconnect_events) - 1))
-                return len(self.reconnect_events) - 1
-        else:
-            logger.error(f"Попытка разрыва несуществующего WebSocket-соединения с клиентом {self.get_conn_info(ws)}."
-                         f"Доступные WebSocket-соединения с клиентами: {'\n'.join(self.get_conn_info(ws) for ws in self.active_connections)}")
+        except asyncio.CancelledError as e:
+            pass
     
     async def send_response(self, response: ChatResponse) -> None:
-        ws = self.uuid_to_ws.get(response.uuid)
+        ws = self.client_connection_manager.pop_uuid_to_ws(response.uuid)
+
         if ws is None:
-            logger.warning(f"UUID {response.uuid} не найден - ответ не будет отправлен")
             return
 
         try:
             await ws.send_json(response.model_dump(mode="json"))
 
         except WebSocketDisconnect as e:
-            logger.error(f"""Не удалось отправить запрос по WebSocket-соединению клиенту {self.get_conn_info(ws)}. 
-                             Причина: Клиент {self.get_conn_info(ws)} отсоединился""")
-            await self.disconnect(ws)
+            logger.error(f"Не удалось отправить запрос по WebSocket-соединению клиенту {self.client_connection_manager.get_conn_info(ws)}. " 
+                         f"Причина: Клиент {self.client_connection_manager.get_conn_info(ws)} отсоединился")
+            await self.client_connection_manager.disconnect(ws)
         
         except RuntimeError as e:
-            pass
+            logger.error(f"Произошла ошибка во время отправки ответа клиенту {self.client_connection_manager.get_conn_info(ws)}: {e}")
 
 
 class ServiceConnectionManager:
     def __init__(self, max_delay: int = 60):
         self.active_connections = {}
         self.max_delay = max_delay
-        logger.debug("Инициализирован ServiceConnectionManager")
     
     def get_conn_info(self, endpoint: str) -> tuple[ClientConnection, str, int]:
         if endpoint not in self.active_connections:
@@ -129,17 +198,13 @@ class ServiceConnectionManager:
         return ws, host, port
     
     async def stop(self) -> None:
-        logger.info("Завершение работы ServiceConnectionManager...")
-        for endpoint in list(self.active_connections):
-            await self.disconnect(endpoint)
-        logger.info("ServiceConnectionManager завершил свою работу")
+        await asyncio.gather(*[self.disconnect(endpoint) for endpoint in list(self.active_connections)])
 
     async def connect(self, endpoint: str, port: int, host: str) -> ClientConnection:
         delay = 1
         while delay < self.max_delay:
             try:
                 ws = await connect(f"ws://{host}:{port}/{endpoint}", ping_interval=None, ping_timeout=None)
-                client = ws.remote_address
                 logger.info(f"Успешное подключение к сервису ws://{host}:{port}/{endpoint}")
                 self.active_connections[endpoint] = (ws, host, port)
                 return ws
@@ -157,18 +222,19 @@ class ServiceConnectionManager:
                 delay = min(60, delay * 2)
                 await asyncio.sleep(delay)
                 continue
-        raise
+
+        raise ConnectionClosed
 
     async def disconnect(self, endpoint: str, code: int = 1000) -> None:
         try:
             ws, host, port = self.get_conn_info(endpoint)
             await ws.close(code=code)
 
-            del self.active_connections[endpoint]
+            self.active_connections.pop(endpoint, None)
             logger.info(f"WebSocket-соединение с ws://{host}:{port}/{endpoint} разорвано: {code}")
 
         except ValueError as e:
-            logger.error(f"Попытка отправить разорвать неизвестное WebSocket-соединение с {endpoint}")
+            pass
 
     async def safe_send(self, endpoint: str, requests: BaseModel) -> None:
         try:

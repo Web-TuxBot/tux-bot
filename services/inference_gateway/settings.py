@@ -13,10 +13,11 @@ class InferenceSettings(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_nested_max_split=1, env_nested_delimiter="_")
+    model_config = SettingsConfigDict(env_nested_max_split=1, env_nested_delimiter="_")
     batcher: BatcherSettings
     inference: InferenceSettings
     client_reconnect_max_s: int
-    service_reconnect_max_s: int
+    client_time_ping_s: int
+    client_time_pong_s: int
 
-settings = Settings(_env_file=".env")
+settings = Settings()

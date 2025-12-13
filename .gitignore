@@ -1,5 +1,6 @@
 __pycache__/
 *.log
 test_backend.py
+ping_pong_test.py
 backend.py
 index.html

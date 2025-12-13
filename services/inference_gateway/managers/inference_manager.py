@@ -3,6 +3,7 @@ from .ws_connection import ServiceConnectionManager
 from .batch_manager import BatchManager
 import asyncio
 from asyncio import Future
+from websockets import ConnectionClosed
 from uuid import UUID
 from ..logger import logger
 
@@ -17,7 +18,6 @@ class InferenceManager:
         self.inference_endpoint = inference_endpoint
         self.batcher = BatchManager(max_buffer_len=max_buffer_len, interval_time_ms=interval_time_ms)
         self.pending = {}
-        self.lock = asyncio.Lock()
         logger.debug(f"Инициализирован менеджер инференса: inference endpoint: {self.inference_endpoint}")
         
     async def inference(self, service_conn_manager: ServiceConnectionManager) -> None:
@@ -30,9 +30,16 @@ class InferenceManager:
                     requests.append(request)
                     uuids.append(uuid)
                 requests = LLMRequest(requests=requests, model_name=self.model_name)
+                
+                try:
+                    await service_conn_manager.safe_send(self.inference_endpoint, requests)
+                    responses = await service_conn_manager.safe_recv(self.inference_endpoint)
 
-                await service_conn_manager.safe_send(self.inference_endpoint, requests)
-                responses = await service_conn_manager.safe_recv(self.inference_endpoint)
+                except ConnectionClosed:
+                    logger.error("Не удалось отправить/получить сообщения с инференс-сервиса: Инференс-сервис закрыт")
+                    for uuid in uuids:
+                        self.cancel_future(uuid)
+                    continue
                 
                 created_at = responses.created_at
                 
@@ -52,17 +59,15 @@ class InferenceManager:
         return self.pending[uuid]
     
     async def cancel_future(self, uuid: UUID):
-        async with self.lock:
-            if uuid in self.pending:
-                fut = self.pending.pop(uuid)
-                fut.cancel()
+        if uuid in self.pending:
+            fut = self.pending.pop(uuid)
+            fut.cancel()
     
     async def send_response(self, responses: dict[str, str], created_at: str) -> None:
         for uuid, response in responses.items():
-            async with self.lock:
-                if uuid in self.pending:
-                    fut = self.pending.pop(uuid) 
-                    if fut and not fut.done():
-                        fut.set_result((response, created_at))
-                else:
-                    continue
+            if uuid in self.pending:
+                fut = self.pending.pop(uuid) 
+                if fut and not fut.done():
+                    fut.set_result((response, created_at))
+            else:
+                continue

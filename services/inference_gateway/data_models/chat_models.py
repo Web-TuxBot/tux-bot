@@ -11,6 +11,3 @@ class ChatResponse(BaseModel):
     uuid: UUID
     response: str
     created_at: str
-
-class ClientReconnect(BaseModel):
-    uuids: list[UUID]

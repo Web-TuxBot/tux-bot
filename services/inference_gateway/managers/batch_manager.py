@@ -31,7 +31,6 @@ class BatchManager:
     async def stop(self):
         self.timer_task.cancel()
         await self.timer_task
-        logger.info("BatchManager завершил свою работу")
 
     async def add_to_buffer(self, uuid: UUID, message: str):
         async with self.lock:
@@ -40,7 +39,7 @@ class BatchManager:
             if len(self.buffer) >= self.max_buffer_len:
                 self.batch_queue.put_nowait(self.buffer.copy())
                 self.buffer.clear()
-    
+
     async def get_batch(self) -> dict[str, str]:
         batch = await self.batch_queue.get()
         return batch

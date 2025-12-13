@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 import asyncio
 from .routers.inference_ws import inference_ws_router
-from .managers.ws_connection import ClientConnectionManager, ServiceConnectionManager
+from .managers.ws_connection import ClientManager, ServiceConnectionManager
 from .managers.inference_manager import InferenceManager
 from .logger import logger
 from .settings import settings
@@ -14,7 +14,6 @@ async def lifespan(app: FastAPI):
         inference = asyncio.create_task(
             app.state.inference_manager.inference(app.state.service_conn_manager)
         )
-
         yield
 
     except Exception as e:
@@ -22,7 +21,6 @@ async def lifespan(app: FastAPI):
 
     finally:
         logger.info("Завершение работы Inference Gateway...")
-        logger.info("Завершение работы InferenceManager...")
         if inference:
             inference.cancel()
             try:
@@ -30,10 +28,8 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
 
-        await app.state.service_conn_manager.stop()
-        await app.state.client_conn_manager.stop()
+        await app.state.client_manager.stop()
 
-        logger.info("InferenceManager завершил свою работу")
         logger.info("Inference Gateway завершил свою работу")
     
 
@@ -41,7 +37,8 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.include_router(inference_ws_router)
     app.state.settings = settings
-    app.state.client_conn_manager = ClientConnectionManager()
+    app.state.client_manager = ClientManager(time_ping_s=app.state.settings.client_time_ping_s,
+                                                            pong_timeout_s=app.state.settings.client_time_pong_s)
     app.state.service_conn_manager = ServiceConnectionManager(max_delay=60)
     app.state.inference_manager = InferenceManager(model_name="qwen2-5_instruct", 
                                                    inference_endpoint="inference/generate",
