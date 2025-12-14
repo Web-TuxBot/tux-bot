@@ -1,36 +1,11 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from omegaconf import OmegaConf
-from .inference_gateway.data_models.inference_models import LLMResponse, LLMRequest
+from services.inference_gateway.data_models.inference_models import LLMResponse, LLMRequest
 from pathlib import Path
 from datetime import datetime
 import asyncio
 import logging
 import os
-
-
-class LLMModel:
-    def __init__(self, model_name: str):
-        self.cls = self._get_model_class(model_name)
-        self.cfg = self._get_model_config(model_name)
-        self.model = self.cls(self.cfg)
-        self.model.load_model()
-
-    def _get_model_class(self, model_name: str):
-        if model_name == "qwen2-5_instruct":
-            from models.qwen_modeling import Qwen2_5Instruct
-            return Qwen2_5Instruct
-        else:
-            raise ValueError(f"Модель {model_name} не поддерживается")
-    
-    def _get_model_config(self, model_name: str):
-        cfg_name = f"{model_name}_config.yaml"
-        cfg_path = Path(__file__).parent.parent / f"model_configs/{cfg_name}"
-        cfg = OmegaConf.load(cfg_path)
-        return cfg
-    
-    def get_response(self, batch: list[str]):
-        requests = self.model.generate_response(batch)
-        return requests
 
 
 async def lifespan(app: FastAPI):
@@ -53,7 +28,7 @@ def init_logger(model_name: str):
 
     return logger
 
-
+# Говнокод, есть более новая версия инференса, это чисто для эхо
 def create_app():
     app = FastAPI(lifespan=lifespan)
     app.state.model_name = os.environ.get("MODEL_NAME")
@@ -73,10 +48,9 @@ def create_app():
                     await ws.close()
                     break
                 batch = LLMRequest(**data)
-                # ЭТО ЭХО ЗАГЛУШКА!!!
+                # Эхо
                 for i in range(len(batch.requests)):
                     responses.append(batch.requests[i])
-                ########################################
                 #responses = app.state.model.get_response(batch.requests)
                 created_at = datetime.now().isoformat()
                 try:

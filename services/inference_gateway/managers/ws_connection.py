@@ -21,12 +21,13 @@ class ClientPingManager:
     def get_frozen_client(self) -> list | None:
         if len(self.ping_tasks) > 0:
             wss = [ws for ws in self.ping_tasks if self.ping_tasks[ws].done()]
-            return wss if len(wss) > 0 else None
+            for ws in wss:
+                self.ping_tasks.pop(ws, None)
+            return wss
         return None
 
     async def handle_pong(self, ws: WebSocket) -> None:
         self.last_pong[ws] = asyncio.get_running_loop().time()
-
 
     async def check_pong(self, ws: WebSocket):
         await asyncio.sleep(self.pong_timeout_s)
@@ -34,7 +35,6 @@ class ClientPingManager:
         if asyncio.get_running_loop().time() - self.last_pong.get(ws, 0) > self.pong_timeout_s:
             ws_info = f"{ws.client[0]}:{ws.client[1]}" if ws.client is not None else "unknown"
             logger.info(f"Клиент {ws_info} не отвечает")
-            await self.remove_client(ws)
             return False
         
         return True
@@ -51,6 +51,7 @@ class ClientPingManager:
                     check_pong_task = asyncio.create_task(self.check_pong(ws))
                     ok = await check_pong_task
                     if not ok:
+                        await self.remove_client(ws)
                         break
 
                 except (WebSocketDisconnect, RuntimeError):
@@ -65,8 +66,8 @@ class ClientPingManager:
         self.ping_tasks[ws] = task
 
     async def remove_client(self, ws: WebSocket) -> None:
-        task = self.ping_tasks.pop(ws, None)
-        if task:
+        task = self.ping_tasks.get(ws)
+        if task is not None:
             task.cancel()
             try:
                 await task
@@ -159,7 +160,7 @@ class ClientManager:
     async def check_frozen_clients(self):
         try:
             while True:
-                await asyncio.sleep(self.pong_timeout_s)
+                await asyncio.sleep(self.pong_timeout_s + 5)
                 wss = self.client_ping_manager.get_frozen_client()
                 if wss is not None:
                     await asyncio.gather(*[self.client_connection_manager.disconnect(ws, 1001) for ws in wss])
