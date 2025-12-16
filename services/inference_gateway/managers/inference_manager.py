@@ -9,16 +9,14 @@ from ..logger import logger
 
 
 class InferenceManager:
-    def __init__(self, 
-                 model_name: str, 
+    def __init__(self,
                  inference_endpoint: str,
                  max_buffer_len: int = 10, 
                  interval_time_ms: int = 100):
-        self.model_name = model_name
         self.inference_endpoint = inference_endpoint
         self.batcher = BatchManager(max_buffer_len=max_buffer_len, interval_time_ms=interval_time_ms)
         self.pending = {}
-        logger.debug(f"Инициализирован менеджер инференса: inference endpoint: {self.inference_endpoint}")
+        logger.info(f"Инициализирован менеджер инференса: inference endpoint - {self.inference_endpoint}")
         
     async def inference(self, service_conn_manager: ServiceConnectionManager) -> None:
         try:
@@ -29,17 +27,25 @@ class InferenceManager:
                 for uuid, request in batch.items():
                     requests.append(request)
                     uuids.append(uuid)
-                requests = LLMRequest(requests=requests, model_name=self.model_name)
+                requests = LLMRequest(requests=requests)
                 
                 try:
                     await service_conn_manager.safe_send(self.inference_endpoint, requests)
                     responses = await service_conn_manager.safe_recv(self.inference_endpoint)
 
-                except ConnectionClosed:
+                except ConnectionClosed as e:
                     logger.error("Не удалось отправить/получить сообщения с инференс-сервиса: Инференс-сервис закрыт")
                     for uuid in uuids:
                         self.cancel_future(uuid)
-                    continue
+                    self.batcher.stop()
+                    return
+
+                except Exception as e:
+                    logger.critical(f"Критическая ошибка при попытке отправить/получить сообщения с инференс-сервиса: {e}")
+                    for uuid in uuids:
+                        self.cancel_future(uuid)
+                    self.batcher.stop()
+                    return
                 
                 created_at = responses.created_at
                 
@@ -47,7 +53,7 @@ class InferenceManager:
                 for response, uuid in zip(responses.responses, uuids):
                     responses_dict[uuid] = response 
 
-                await self.send_response(responses_dict, created_at)
+                self.send_response(responses_dict, created_at)
 
         except asyncio.CancelledError as e:
             await self.batcher.stop()
@@ -61,9 +67,14 @@ class InferenceManager:
     async def cancel_future(self, uuid: UUID):
         if uuid in self.pending:
             fut = self.pending.pop(uuid)
-            fut.cancel()
+            if fut and not fut.done():
+                fut.cancel()
+                try:
+                    await fut
+                except asyncio.CancelledError:
+                    pass
     
-    async def send_response(self, responses: dict[str, str], created_at: str) -> None:
+    def send_response(self, responses: dict[str, str], created_at: str) -> None:
         for uuid, response in responses.items():
             if uuid in self.pending:
                 fut = self.pending.pop(uuid) 

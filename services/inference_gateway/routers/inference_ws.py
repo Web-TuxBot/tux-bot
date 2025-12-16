@@ -14,7 +14,7 @@ async def inference_ws(ws: WebSocket):
     handles = []
 
     try: 
-        await app.state.client_manager.client_connection_manager.connect(ws) 
+        await app.state.client_manager.connect(ws) 
     except (WebSocketDisconnect, RuntimeError):
         return
 
@@ -27,26 +27,38 @@ async def inference_ws(ws: WebSocket):
                 raise WebSocketDisconnect
 
             if data.get("type") == "pong": 
-                await app.state.client_manager.client_ping_manager.handle_pong(ws) 
+                await app.state.client_manager.handle_pong(ws) 
                 continue 
 
             req = ChatRequest(**data) 
 
-            await app.state.client_manager.client_connection_manager.add_uuid(ws, req.uuid) 
-            fut = await app.state.inference_manager.add_request(req.uuid, req.message) 
+            if req.model_name not in app.state.inference_managers:
+                logger.warning(f"Запрошен запрос к неизвестной модели: {req.model_name}")
+                raise WebSocketDisconnect
 
-            async def handle_request(uuid: UUID, fut: asyncio.Future) -> None:
+            if app.state.inferences[req.model_name].done():
+                raise WebSocketDisconnect
+            
+            await app.state.client_manager.add_uuid(ws, req.uuid) 
+            fut = await app.state.inference_managers[req.model_name].add_request(req.uuid, req.message) 
+
+            async def handle_request(uuid: UUID, fut: asyncio.Future, model_name: str) -> None:
                 try: 
                     response, created_at = await fut 
                     response = ChatResponse(uuid=uuid, response=response, created_at=created_at) 
                     await app.state.client_manager.send_response(response) 
 
                 except asyncio.CancelledError as e: 
-                    await app.state.inference_manager.cancel_future(uuid)
+                    await app.state.inference_managers[model_name].cancel_future(uuid)
 
-            handles.append(asyncio.create_task(handle_request(req.uuid, fut))) 
+            handles.append(asyncio.create_task(handle_request(req.uuid, fut, req.model_name))) 
             handles = [h for h in handles if not h.done()] 
 
     except WebSocketDisconnect as e: 
-        await app.state.client_manager.client_connection_manager.disconnect(ws)
-        await asyncio.gather(*[h for h in handles])
+        await app.state.client_manager.disconnect(ws)
+        for handle in handles:
+            handle.cancel()
+            try:
+                await handle
+            except asyncio.CancelledError:
+                pass

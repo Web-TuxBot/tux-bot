@@ -124,7 +124,6 @@ class ClientConnectionManager:
                 try:
                     if ws.client_state == WebSocketState.CONNECTED:
                         await ws.close(code)
-                        logger.info(f"Разорвано WebSocket-соединение с клиентом {self.get_conn_info(ws)}: {code}")
                     
                 except RuntimeError as e:
                     logger.error(f"Произошла ошибка при попытке разрыва соединения с клиентом {self.get_conn_info(ws)}: {e}")
@@ -137,6 +136,7 @@ class ClientConnectionManager:
                     for uuid in list(self._uuid_to_ws):
                         if self._uuid_to_ws[uuid] == ws:
                             self.pop_uuid_to_ws(uuid)
+                    logger.info(f"Разорвано WebSocket-соединение с клиентом {self.get_conn_info(ws)}: {code}")
 
 
 class ClientManager:
@@ -167,6 +167,18 @@ class ClientManager:
 
         except asyncio.CancelledError as e:
             pass
+    
+    async def connect(self, ws: WebSocket):
+        await self.client_connection_manager.connect(ws)
+
+    async def disconnect(self, ws: WebSocket):
+        await self.client_connection_manager.disconnect(ws)
+
+    async def add_uuid(self, ws: WebSocket, uuid: UUID):
+        await self.client_connection_manager.add_uuid(ws, uuid)
+
+    async def handle_pong(self, ws: WebSocket):
+        await self.client_ping_manager.handle_pong(ws)
     
     async def send_response(self, response: ChatResponse) -> None:
         ws = self.client_connection_manager.pop_uuid_to_ws(response.uuid)
@@ -219,8 +231,8 @@ class ServiceConnectionManager:
                 raise e
             
             except OSError as e:
-                logger.warning(f"Не удалось установить WebSocket-соединение с {endpoint}: Переподключение через {delay} с")
                 delay = min(60, delay * 2)
+                logger.warning(f"Не удалось установить WebSocket-соединение с {endpoint}: Переподключение через {delay} с")
                 await asyncio.sleep(delay)
                 continue
 
@@ -247,7 +259,11 @@ class ServiceConnectionManager:
                 except ConnectionClosed as e:
                     logger.warning(f"Потеряно WebSocket-соединение с сервисом ws://{host}:{port}/{endpoint}" 
                                    f"при отправке запроса: HTTP {e.rcvd.code} Переподключение...")
-                    ws = await self.connect(endpoint, port, host)
+                    try:
+                        ws = await self.connect(endpoint, port, host)
+                    except ConnectionClosed as e:
+                        raise e
+                    
                     logger.info(f"WebSocket-соединение с сервисом ws://{host}:{port}/{endpoint} восстановлено")
                     continue
 
@@ -265,7 +281,11 @@ class ServiceConnectionManager:
                     break
                 except ConnectionClosed as e:
                     logger.warning(f"Потеряно WebSocket-соединение с инференс-сервисом ws://{host}:{port}/{endpoint} при приеме ответов: Попытка переподключения")
-                    ws = await self.connect(endpoint, port, host)
+                    try:
+                        ws = await self.connect(endpoint, port, host)
+                    except ConnectionClosed as e:
+                        raise e
+                    
                     logger.info(f"WebSocket-cоединение с инференс-сервисом ws://{host}:{port}/{endpoint} восстановлено")
                     continue
         except ValueError as e:

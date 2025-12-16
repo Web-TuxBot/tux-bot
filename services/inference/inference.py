@@ -1,40 +1,45 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from omegaconf import OmegaConf
-from services.inference_gateway.data_models.inference_models import LLMResponse, LLMRequest
-from pathlib import Path
+from .inference_models import LLMResponse, LLMRequest
 from datetime import datetime
 import asyncio
 import logging
+import colorlog
 import os
 
 
-async def lifespan(app: FastAPI):
-    #app.state.model = LLMModel(model_name=app.state.model_name)
-    yield
-
-
-def init_logger(model_name: str):
-    logger = logging.getLogger(__name__)
+def init_logger():
+    logger = logging.getLogger("inference")
     logger.setLevel(logging.DEBUG)
 
-    log_date = datetime.now().strftime("%Y-%m-%d")
-    file_handler = logging.FileHandler(f"services/logs/inference_{model_name}_{log_date}.log")
-    file_handler.setLevel(logging.DEBUG)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO)
+    formatter = colorlog.ColoredFormatter(
+        "%(log_color)s%(asctime)s %(levelname)s%(reset)s - %(message)s",
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'bold_red,bg_white'
+        },
+        datefmt='%Y-%m-%d %H:%M:%C',
+        reset=True,
+        style='%' 
+        )
 
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
+    stream_handler.setFormatter(formatter)
 
-    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
 
     return logger
 
 # Говнокод, есть более новая версия инференса, это чисто для эхо
 def create_app():
-    app = FastAPI(lifespan=lifespan)
-    app.state.model_name = os.environ.get("MODEL_NAME")
-    logger = init_logger(app.state.model_name)
+    app = FastAPI()
+    model_name = os.getenv("MODEL_NAME")
+    logger = init_logger()
 
-    @app.websocket(f"/inference/generate")
+    @app.websocket(f"/inference/{model_name}/generate")
     async def websocket_endpoint(ws: WebSocket):
         await ws.accept()
         host, port = ws.client
@@ -42,16 +47,14 @@ def create_app():
         try:
             while True:
                 try:
-                    data = await asyncio.wait_for(ws.receive_json(), timeout=300)
+                    data = await ws.receive_json()
                 except asyncio.TimeoutError:
                     logger.critical(f"Соединение с клиентом {host}:{port} потеряно при попытке принять запрос")
                     await ws.close()
                     break
                 batch = LLMRequest(**data)
-                # Эхо
                 for i in range(len(batch.requests)):
                     responses.append(batch.requests[i])
-                #responses = app.state.model.get_response(batch.requests)
                 created_at = datetime.now().isoformat()
                 try:
                     await asyncio.wait_for(ws.send_json(
