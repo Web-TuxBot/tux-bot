@@ -12,10 +12,12 @@ class InferenceService(BaseModel):
 
 
 class Settings(BaseSettings):
-    #model_config = SettingsConfigDict(env_nested_max_split=1, env_nested_delimiter="_")
     inference_services: list[InferenceService]
-    client_time_ping_s: int = Field(default=30)
-    client_time_pong_s: int = Field(default=25)
+    client_ping_interval: int = Field(default=30)
+    client_ping_timeout: int = Field(default=25)
+    service_ping_interval: int = Field(default=30)
+    service_ping_timeout: int = Field(default=25)
+    service_max_delay: int = Field(default=60)
 
 
 settings = Settings()

@@ -1,5 +1,5 @@
-from ..data_models.inference_models import LLMRequest
-from .ws_connection import ServiceConnectionManager
+from ..data_models.inference_models import LLMRequest, LLMResponse
+from .service_manager import ServiceConnectionManager
 from .batch_manager import BatchManager
 import asyncio
 from asyncio import Future
@@ -30,21 +30,22 @@ class InferenceManager:
                 requests = LLMRequest(requests=requests)
                 
                 try:
-                    await service_conn_manager.safe_send(self.inference_endpoint, requests)
-                    responses = await service_conn_manager.safe_recv(self.inference_endpoint)
+                    await service_conn_manager.safe_send(self.inference_endpoint, requests.model_dump(mode="json"))
+                    responses = await service_conn_manager.safe_recv(self.inference_endpoint, requests.model_dump(mode="json"))
+                    responses = LLMResponse(**responses)
 
                 except ConnectionClosed as e:
                     logger.error("Не удалось отправить/получить сообщения с инференс-сервиса: Инференс-сервис закрыт")
                     for uuid in uuids:
                         self.cancel_future(uuid)
-                    self.batcher.stop()
+                    await self.batcher.stop()
                     return
 
                 except Exception as e:
                     logger.critical(f"Критическая ошибка при попытке отправить/получить сообщения с инференс-сервиса: {e}")
                     for uuid in uuids:
                         self.cancel_future(uuid)
-                    self.batcher.stop()
+                    await self.batcher.stop()
                     return
                 
                 created_at = responses.created_at

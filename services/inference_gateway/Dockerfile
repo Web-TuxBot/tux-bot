@@ -10,10 +10,13 @@ RUN pip install --no-cache-dir -r requirements.txt && mkdir inference_gateway
 COPY . /app/inference_gateway
 
 ENV INFERENCE_SERVICES='[{"model_name": "qwen2-5_instruct", "host": "0.0.0.0", "port": 8002, "max_buffer_len": 50, "interval_time_ms": 100}]'
-ENV CLIENT_TIME_PING_S=30
-ENV CLIENT_TIME_PONG_S=25
+ENV CLIENT_PING_INTERVAL=30
+ENV CLIENT_PING_TIMEOUT=25
+ENV SERVICE_PING_INTERVAL=30
+ENV SERVICE_PING_TIMEOUT=25
+ENV SERVICE_MAX_DELAY=60
 
 ENTRYPOINT ["uvicorn", "--factory", "inference_gateway.app:create_app"]
-CMD ["--port", "8000", "--log-level", "info", "--host", "0.0.0.0", "--workers", "1"]
+CMD ["--port", "8000", "--log-level", "info", "--host", "0.0.0.0"]
 
 

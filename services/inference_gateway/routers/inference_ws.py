@@ -23,7 +23,7 @@ async def inference_ws(ws: WebSocket):
             try:
                 data = await ws.receive_json() 
             except RuntimeError as e:
-                logger.error(f"Возникла ошибка при попытке принять сообщение от клиент: {e}")
+                logger.error(f"Возникла ошибка при попытке принять сообщение от клиента: {e}")
                 raise WebSocketDisconnect
 
             if data.get("type") == "pong": 
@@ -38,6 +38,7 @@ async def inference_ws(ws: WebSocket):
 
             if app.state.inferences[req.model_name].done():
                 raise WebSocketDisconnect
+                a
             
             await app.state.client_manager.add_uuid(ws, req.uuid) 
             fut = await app.state.inference_managers[req.model_name].add_request(req.uuid, req.message) 

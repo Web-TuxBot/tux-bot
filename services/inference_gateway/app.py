@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 import asyncio
 from .routers.inference_ws import inference_ws_router
-from .managers.ws_connection import ClientManager, ServiceConnectionManager
+from .managers.service_manager import ServiceConnectionManager
+from .managers.client_manager import ClientManager
 from .managers.inference_manager import InferenceManager
 from .logger import logger
 from .settings import settings
@@ -42,9 +43,11 @@ def create_app() -> FastAPI:
     app.include_router(inference_ws_router)
     app.state.settings = settings
 
-    app.state.client_manager = ClientManager(time_ping_s=app.state.settings.client_time_ping_s,
-                                                            pong_timeout_s=app.state.settings.client_time_pong_s)
-    app.state.service_conn_manager = ServiceConnectionManager(max_delay=60)
+    app.state.client_manager = ClientManager(ping_interval=app.state.settings.client_ping_interval,
+                                                            ping_timeout=app.state.settings.client_ping_timeout)
+    app.state.service_conn_manager = ServiceConnectionManager(max_delay=app.state.settings.service_max_delay,
+                                                              ping_interval=app.state.settings.service_ping_interval,
+                                                              ping_timeout=app.state.settings.service_ping_timeout)
 
     app.state.inference_managers = {}
     for inference_service in app.state.settings.inference_services:
