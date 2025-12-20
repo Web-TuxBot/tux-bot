@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Variant 2 Test: REST chat + WS messages</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+    .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    input, textarea, button, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin: 6px 0; }
+    textarea { min-height: 100px; resize: vertical; }
+    button { background: #007bff; color: white; border: none; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #6c757d; cursor: not-allowed; }
+    .log { background: #0b1020; color: #d7e0ff; padding: 12px; border-radius: 8px; white-space: pre-wrap; min-height: 240px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    hr { margin: 18px 0; border: none; border-top: 1px solid #eee; }
+    .muted { color: #666; font-size: 12px; margin-top: -4px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>🧪 Variant 2: REST creates chat only, WS creates messages</h2>
+
+  <div class="row">
+    <div>
+      <label>API Base (HTTP)</label>
+      <input id="apiBase" value="http://localhost:52052"/>
+      <div class="muted">Пример: http://localhost:52052</div>
+    </div>
+    <div>
+      <label>WS URL</label>
+      <input id="wsUrl" value="ws://localhost:52052/ws"/>
+      <div class="muted">Пример: ws://localhost:52052/ws</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>User ID</label>
+      <input id="userId" type="number" value="123"/>
+    </div>
+    <div>
+      <label>Status</label>
+      <input id="status" readonly value="❌ WS не подключён"/>
+    </div>
+  </div>
+
+  <label>Model name</label>
+  <input id="modelName" value="qwen2-5_instruct"/>
+
+  <label>Model version</label>
+  <input id="modelVersion" value="v1"/>
+
+  <label>Prompt</label>
+  <textarea id="prompt">Привет! Как дела?</textarea>
+
+  <button id="runBtn">1) POST /chats → 2) WS connect → 3) WS send</button>
+
+  <hr>
+
+  <h3>Helpers</h3>
+  <div class="row">
+    <button id="listChatsBtn">GET /chats?user_id=...</button>
+    <button id="listMsgsBtn">GET /chats/{chat_uuid}/messages?user_id=...</button>
+  </div>
+
+  <label>Current chat_uuid</label>
+  <input id="chatUUID" placeholder="подставится после POST /chats"/>
+
+  <label>Last user_message_uuid (sent by WS)</label>
+  <input id="userMsgUUID" placeholder="uuid user message"/>
+
+  <label>Last bot_message_uuid (from WS response)</label>
+  <input id="botMsgUUID" placeholder="uuid bot message"/>
+
+  <div class="row">
+    <select id="isPositive">
+      <option value="true">👍 true</option>
+      <option value="false">👎 false</option>
+    </select>
+    <button id="feedbackBtn">POST /messages/{bot_uuid}/feedback</button>
+  </div>
+
+  <hr>
+
+  <h3>Log</h3>
+  <div id="log" class="log">Готово. Нажми кнопку запуска…</div>
+</div>
+
+<script>
+let ws = null;
+
+const el = (id) => document.getElementById(id);
+const logEl = el("log");
+
+function addLog(line) {
+  const ts = new Date().toLocaleTimeString();
+  logEl.textContent += `\n[${ts}] ${line}`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(ok, text) {
+  el("status").value = (ok ? "✅ " : "❌ ") + text;
+}
+
+function uuid() {
+  return (crypto && crypto.randomUUID) ? crypto.randomUUID() :
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+}
+
+function apiBase() {
+  return el("apiBase").value.trim().replace(/\/$/, "");
+}
+
+function wsBase() {
+  let u = el("wsUrl").value.trim();
+
+  // убрать случайные пробелы внутри "localhost: 52052"
+  u = u.replace(/\s+/g, "");
+
+  if (!u.startsWith("ws://") && !u.startsWith("wss://")) u = "ws://" + u;
+  return u;
+}
+
+function titleFromPrompt(s) {
+  s = (s || "").trim();
+  if (!s) return "New chat";
+  let cut = s.length;
+  for (const sep of [".","!","?","\n"]) {
+    const i = s.indexOf(sep);
+    if (i >= 0 && i < cut) cut = i;
+  }
+  let t = s.slice(0, cut).trim();
+  if (!t) t = s.trim();
+  if (t.length > 80) t = t.slice(0, 80);
+  return t || "New chat";
+}
+
+async function createChatOnly(chat_uuid, title) {
+  const body = {
+    chat_uuid,
+    user_id: Number(el("userId").value),
+    model_name: el("modelName").value.trim(),
+    model_version: el("modelVersion").value.trim(),
+    title
+  };
+
+  addLog(`POST ${apiBase()}/chats`);
+  addLog(`body: ${JSON.stringify(body)}`);
+
+  const r = await fetch(apiBase() + "/chats", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+
+  const txt = await r.text();
+  addLog(`REST status: ${r.status}`);
+  addLog(`REST resp: ${txt}`);
+
+  if (!r.ok) throw new Error("POST /chats failed");
+
+  let j = {};
+  try { j = JSON.parse(txt); } catch (_) {}
+  return j.chat_uuid || chat_uuid;
+}
+
+function closeWSIfAny() {
+  try {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      ws.close(1000, "restart");
+    }
+  } catch (_) {}
+  ws = null;
+  setStatus(false, "WS не подключён");
+}
+
+function connectWS() {
+  return new Promise((resolve, reject) => {
+    const url = wsBase();
+    addLog(`WS connect: ${url}`);
+
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      setStatus(true, "WS подключён");
+      addLog("WS connected ✅");
+      resolve();
+    };
+
+    ws.onmessage = (event) => {
+      // 1) всегда логируем raw
+      addLog("WS RAW: " + event.data);
+
+      // 2) пытаемся распарсить JSON
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (e) {
+        addLog("WS JSON.parse ERROR: " + e);
+        return;
+      }
+
+      // 3) ping/pong (если сервер шлёт JSON ping)
+      if (data && data.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong" }));
+        addLog("WS ping → pong");
+        return;
+      }
+
+      // 4) нормальные ответы
+      if (data.chat_uuid) el("chatUUID").value = data.chat_uuid;
+      if (data.user_message_uuid) el("userMsgUUID").value = data.user_message_uuid;
+      if (data.bot_message_uuid) el("botMsgUUID").value = data.bot_message_uuid;
+
+      addLog("WS PARSED: " + JSON.stringify(data));
+    };
+
+    ws.onerror = (e) => {
+      addLog("WS error: " + (e.message || "unknown"));
+      reject(e);
+    };
+
+    ws.onclose = (e) => {
+      setStatus(false, `WS closed (code ${e.code})`);
+      addLog(`WS closed: code=${e.code} reason=${e.reason || ""}`);
+    };
+  });
+}
+
+function sendWSMessage(chat_uuid, user_message_uuid) {
+  const payload = {
+    chat_uuid,
+    uuid: user_message_uuid, // user message_uuid (from frontend)
+    model_name: el("modelName").value.trim(),
+    message: el("prompt").value
+  };
+
+  ws.send(JSON.stringify(payload));
+  addLog(`WS sent: ${JSON.stringify(payload)}`);
+}
+
+async function listChats() {
+  const u = Number(el("userId").value);
+  const r = await fetch(`${apiBase()}/chats?user_id=${encodeURIComponent(u)}`);
+  const txt = await r.text();
+  addLog(`GET /chats status=${r.status}`);
+  addLog(`GET /chats resp=${txt}`);
+}
+
+async function listMessages() {
+  const u = Number(el("userId").value);
+  const c = el("chatUUID").value.trim();
+  if (!c) { addLog("chatUUID empty"); return; }
+
+  const r = await fetch(`${apiBase()}/chats/${encodeURIComponent(c)}/messages?user_id=${encodeURIComponent(u)}`);
+  const txt = await r.text();
+  addLog(`GET /messages status=${r.status}`);
+  addLog(`GET /messages resp=${txt}`);
+
+  // Автоподхват последнего bot uuid
+  try {
+    const j = JSON.parse(txt);
+    const bot = [...(j.items || [])].reverse().find(m => m.role === "bot");
+    if (bot) el("botMsgUUID").value = bot.id;
+  } catch (_) {}
+}
+
+async function sendFeedback() {
+  const msg = el("botMsgUUID").value.trim();
+  if (!msg) { addLog("botMsgUUID empty"); return; }
+
+  const body = {
+    user_id: Number(el("userId").value),
+    is_positive: el("isPositive").value === "true"
+  };
+
+  const r = await fetch(`${apiBase()}/messages/${encodeURIComponent(msg)}/feedback`, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(body)
+  });
+
+  const txt = await r.text();
+  addLog(`POST feedback status=${r.status}`);
+  addLog(`POST feedback resp=${txt}`);
+}
+
+el("runBtn").addEventListener("click", async () => {
+  logEl.textContent = "Запуск (variant 2)...";
+  closeWSIfAny();
+
+  try {
+    const chat_uuid = uuid();
+    const user_message_uuid = uuid();
+    const title = titleFromPrompt(el("prompt").value);
+
+    el("chatUUID").value = chat_uuid;
+    el("userMsgUUID").value = user_message_uuid;
+    el("botMsgUUID").value = "";
+
+    const createdChat = await createChatOnly(chat_uuid, title);
+    el("chatUUID").value = createdChat;
+
+    await connectWS();
+    sendWSMessage(createdChat, user_message_uuid);
+
+  } catch (e) {
+    addLog("ERROR: " + (e?.message || e));
+  }
+});
+
+el("listChatsBtn").addEventListener("click", listChats);
+el("listMsgsBtn").addEventListener("click", listMessages);
+el("feedbackBtn").addEventListener("click", sendFeedback);
+</script>
+</body>
+</html>
